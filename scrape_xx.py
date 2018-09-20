@@ -50,9 +50,9 @@ class WorkerBase:
         self.items_data = {}  # url -> item data
         self.failures = []  # (kind, url)
 
-    def get(self, *args, allow_redirects=False, **kwargs):
+    def get(self, *args, allow_redirects=True, **kwargs):
 
-        rfs = kwargs.pop('rfs', '200')
+        rfs = kwargs.pop('rfs', True)
 
         headers = dict(kwargs.pop('headers', None) or {})
         # headers['Proxy-Authorization'] = PROXY_AUTH
@@ -176,7 +176,7 @@ class WorkerUtk(WorkerBase):
         else:
             url = self.url_cat_page.format(cat_id=cat['cat_id'], page_num=page)
 
-        page_resp = self.get(url, rfs=True)
+        page_resp = self.get(url, allow_redirects=False)
         if page_resp.status_code in (301, 302):  # pages over limit redirect to non-paged `url2`
             return dict(status='redirected')
         page_bs = self.bs(page_resp)
