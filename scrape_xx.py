@@ -87,10 +87,15 @@ class WorkerBase:
             return default
 
     @staticmethod
-    def map_(func, iterable):
+    def map_require(func, iterable):
         # TODO?: ThreadPool / multiprocessing
         for item in iterable:
             func(item)
+
+    def map_(self, func, iterable):
+        # TODO?: ThreadPool / multiprocessing
+        for item in iterable:
+            self.try_(lambda: func(item))
 
     @staticmethod
     def el_text(el, default=None):
@@ -282,6 +287,8 @@ class WorkerUtk(WorkerBase):
 
 
 if __name__ == '__main__':
-    worker = WorkerUtk()
-    # Rerunnable:
+    try:
+        worker
+    except NameError:
+        worker = WorkerUtk()
     worker.main()
