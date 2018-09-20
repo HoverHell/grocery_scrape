@@ -282,4 +282,6 @@ class WorkerUtk(WorkerBase):
 
 
 if __name__ == '__main__':
-    WorkerUtk().main()
+    worker = WorkerUtk()
+    # Rerunnable:
+    worker.main()
