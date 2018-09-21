@@ -4,17 +4,21 @@
 """
 # pylint: disable=cell-var-from-loop,fixme
 
-
+import os
 import sys
 import re
 import urllib
 import threading
+import datetime
 import logging
 import json
 
 import bs4
 import requests
 from requests.packages.urllib3.util import Retry  # pylint: disable=import-error
+
+
+LOG = logging.getLogger(__name__)
 
 
 # with open('.proxy_auth.txt') as fobj:
@@ -24,13 +28,17 @@ from requests.packages.urllib3.util import Retry  # pylint: disable=import-error
 
 class WorkerBase:
 
-    _max_errors = 1000
+    items_file = None  # required for `self.write_item`.
+
+    _max_errors = 100
 
     retry_conf = Retry(
         total=5, backoff_factor=0.5,
         status_forcelist=[500, 502, 503, 504, 521],
         method_whitelist=frozenset(['HEAD', 'TRACE', 'GET', 'PUT', 'OPTIONS', 'DELETE', 'POST']),
     )
+
+    force = False
 
     def __init__(self):
         self._all_errors = []  # TODO: deque (limited)
@@ -47,8 +55,36 @@ class WorkerBase:
         session.trust_env = False
         self.reqr = session
         self.categories = None
-        self.items_data = {}  # url -> item data
+        self.processed_items = set()
         self.failures = []  # (kind, url)
+
+    @staticmethod
+    def skip_none(dct):
+        return {
+            key: val for key, val in dct.items()
+            if key is not None and val is not None}
+
+    @staticmethod
+    def read_jsl(filename, require=True):
+        try:
+            fobj = open(filename)
+        except FileNotFoundError:
+            if require:
+                raise
+            return
+        for line in fobj:
+            if not line:
+                continue
+            yield json.loads(line.strip())
+
+    def collect_processed_items(self, key='url', filename=None):
+        LOG.debug("Collecting previously processed addresses...")
+        filename = filename or self.items_file
+        for item in self.read_jsl(filename or self.items_file, require=False):
+            # NOTE: if a particular field is particularly required,
+            # this point can be used for debugging its gathering.
+            self.processed_items.add(item.get(key))
+        LOG.debug("Previously processed addresses: %d", len(self.processed_items))
 
     def get(self, *args, allow_redirects=True, **kwargs):
 
@@ -73,17 +109,19 @@ class WorkerBase:
         return resp
 
     def bs(self, resp):
-        return bs4.BeautifulSoup(resp.content, 'html5lib')
+        # return bs4.BeautifulSoup(resp.content, 'html5lib')
+        return bs4.BeautifulSoup(resp.text, 'html5lib')
 
     def try_(self, func, excs=(AttributeError, TypeError, ValueError), default=None):
         try:
             return func()
-        except excs:
+        except excs as exc:
             exc_info = sys.exc_info()
             with self.mgmt_lock:
                 self._all_errors.append(exc_info)
                 if len(self._all_errors) > self._max_errors:
                     self._all_errors.pop(0)
+            LOG.error('`try_`-wrapped error: %r', exc)
             return default
 
     @staticmethod
@@ -109,7 +147,23 @@ class WorkerBase:
         result = result.replace('\xa0', ' ')
         return result
 
+    def write_item(self, data):
+        data_s = json.dumps(data) + '\n'
+        with self.mgmt_lock:
+            with open(self.items_file, 'a', 1) as fobj:
+                fobj.write(data_s)
+
+    def write_data(self, filename, data):
+        with open(filename, 'w') as fo:
+            json.dump(data, fo)
+            fo.write('\n')
+
+    @staticmethod
+    def now():
+        return datetime.datetime.now().isoformat()
+
     def main(self):
+        assert self.items_file
         logging.basicConfig(level=logging.DEBUG)
         return self.main_i()
 
@@ -119,20 +173,20 @@ class WorkerBase:
 
 class WorkerUtk(WorkerBase):
 
+    items_file = 'utk_items.jsl'
+
     url_cats = 'https://www.utkonos.ru/cache/catalogue/megamenu/site/2/type/guest.html?_=1537439034420'
     url_cat_main = 'https://www.utkonos.ru/cat/{cat_id}'
     url_cat_page = 'https://www.utkonos.ru/cat/{cat_id}/page/{page_num}'
 
     def main_i(self):
+        if not self.force:
+            self.collect_processed_items()
+
         cats = self.get_cat_data()
         self.categories = cats
-        try:
-            self.map_(self.process_category, cats)
-        finally:
-            with open('utk_categories.json', 'w') as fobj:
-                json.dump(self.categories, fobj)
-            with open('utk_items.json', 'w') as fobj:
-                json.dump(self.items_data, fobj)
+        self.write_data('utk_categories.json', cats)
+        self.map_(self.process_category, cats)
 
     def get_cat_data(self):
         cat_resp = self.get(self.url_cats)
@@ -195,19 +249,18 @@ class WorkerUtk(WorkerBase):
 
     def process_item(self, item_bs, page_resp):
         item_uri = item_bs.select_one('a.goods_caption').get('href')
-        item_url = urllib.parse.urljoin(page_resp.request.url, item_uri)
+        item_url = urllib.parse.urljoin(page_resp.url, item_uri)
 
         # A bit of simple caching.
         # Particularly necessary because upper categories contain most/all of the subitems.
-        item_data = self.items_data.get(item_url)
-        if item_data:
-            return item_data
+        if item_url in self.processed_items:
+            LOG.debug("Already processed: %s", item_url)
+            return
 
         item_resp = self.get(item_url)
+        base_url = item_resp.url
+        item_data = dict(url=base_url, ts=self.now())
         item_bs = self.bs(item_resp)
-
-        base_url = item_resp.request.url
-        item_data = dict(url=base_url)
 
         pic_bs = item_bs.select_one('.goods_view_item-pic')
         pic_variants = pic_bs.select(
@@ -282,13 +335,144 @@ class WorkerUtk(WorkerBase):
             self.try_(lambda: el.select_one('.goods_view_item-property_value > a').get('href'))
             for el in props}
 
-        self.items_data[item_url] = item_data
-        return item_data
+        self.write_item(item_data)
+        with self.mgmt_lock:
+            self.processed_items.add(item_url)
+
+
+class WorkerImBase(WorkerBase):
+
+    url_cats = None  # required
+    cats_file = None  # required
+
+    def main_i(self):
+        assert self.url_cats
+        assert self.cats_file
+
+        if not self.force:
+            self.collect_processed_items()
+
+        cats = self.get_cat_data(self.url_cats)
+        self.categories = cats
+        self.write_data(self.cats_file, cats)
+        self.map_(self.process_category, cats['urls'])
+
+    def get_cat_data(self, url=None):
+        cat_resp = self.get(url)
+        base_url = cat_resp.url
+        cat_bs = self.bs(cat_resp)
+
+        cats = []
+        urls = []
+        for cat_el in cat_bs.select('a.taxon-title__link'):
+            # A category linked in a category-listing page.
+            cat_data = dict(
+                url=urllib.parse.urljoin(base_url, cat_el.get('href')),
+                title=self.el_text(cat_el),
+            )
+            # Linked page might be a category listing or a product listing.
+            # Have to get the page; will request those pages twice as a result.
+            subcats = self.get_cat_data(cat_data['url'])
+            urls.extend(subcats['urls'])
+            if subcats['cats']:
+                cat_data['subcategories'] = subcats['cats']
+            else:
+                urls.append(cat_data['url'])
+            cats.append(cat_data)
+
+        return dict(cats=cats, urls=urls)
+
+    def process_category(self, root_url):
+        for page in range(1, 9000):
+            page_resp = self.get('{}/page/{}'.format(root_url, page))
+            base_url = page_resp.url
+            page_bs = self.bs(page_resp)
+            items_container_bs = page_bs.select_one('.products_with_filters_wrapper')
+            emptiness_message = items_container_bs.select('.empty-filter-message')
+            if emptiness_message is not None:  # supposedly, an empty page.
+                break
+            items_bses = items_container_bs.selct('li.product')
+            self.map_(lambda item_bs: self.process_item(item_bs, root_url=base_url), items_bses)
+
+    def process_item(self, item_bs, root_url):
+        item_url = item_bs.select_one('a.product_link').get('href')
+        item_url = urllib.parse.urljoin(root_url, item_url)
+
+        if item_url in self.processed_items:
+            LOG.debug("Already processed: %s", item_url)
+            return
+
+        return self.process_item_by_url(item_url)
+
+    def process_item_by_url(self, item_url):
+        item_resp = self.get(item_url)
+        base_url = item_resp.url
+        item_data = dict(url=base_url, ts=self.now())
+        item_bs_root = self.bs(item_resp)
+
+        item_bs = item_bs_root.select_one('.product-popup')
+
+        crumbs_bs = item_bs.select_one('.product-popup__breadcrumbs')
+        crumb_els = self.try_(lambda: crumbs_bs.select('.product-popup__breadcrumbs-link'))
+        item_data['crumbs'] = list(
+            dict(
+                url=urllib.parse.urljoin(base_url, crumb_el.get('href')),
+                title=self.el_text(crumb_el),
+            ) for crumb_el in crumb_els or ())
+
+        img_el = item_bs.select_one('img.product-popup__img')
+        if img_el:
+            item_data['etc_image_preview'] = img_el.get('src')
+            item_data['etc_image'] = img_el.get('data-zoom')
+
+        item_data['title'] = self.el_text(item_bs.select_one('.product-popup__title'))
+
+        item_data['amount_text'] = self.el_text(item_bs.select_one('.product-popup__volume'))
+
+        item_data['price_text'] = self.el_text(item_bs.select_one('.product-popup__price'))
+
+        desc_el = item_bs.select_one('.product-popup__description')
+        if desc_el:
+            item_data['description'] = list(
+                el.decode()  # HTML almost-source.
+                for el in desc_el.children)
+
+        item_data['nutrition_title'] = self.el_text(item_bs.select_one('.nutrition .nutrition_title'))
+        nutrition_props = item_bs.select('.nutrition .product-property')
+        item_data['nutritipn_properties'] = {
+            self.el_text(elem.select_one('.product-property__name')):
+            self.el_text(elem.select_one('.product-property__value'))
+            for elem in nutrition_props}
+
+        item_data['ingredients_text'] = self.el_text(item_bs.select_one('.ingredients__text'))
+
+        other_props = item_bs.select_one('.other-properties .product-property')
+        item_data['properties'] = self.skip_none({
+            self.el_text(elem.select_one('.product-property__name')):
+            self.el_text(elem.select_one('.product-property__value'))
+            for elem in other_props})
+
+        item_data['properties_links'] = self.skip_none({
+            self.el_text(elem.select_one('.product-property__name')):
+            self.try_(lambda: urllib.parse.urljoin(
+                base_url,
+                elem.select_one('.product-property__value a.product-link').get('href')))
+            for elem in other_props})
+
+        self.write_item(item_data)
+        with self.mgmt_lock:
+            self.processed_items.add(item_url)
+
+
+class WorkerImLenta(WorkerImBase):
+
+    url_cats = 'https://instamart.ru/lenta'
+    cats_file = 'im_lenta_categories.json'
+    items_file = 'im_lenta_items.jsl'
 
 
 if __name__ == '__main__':
-    try:
-        worker
-    except NameError:
-        worker = WorkerUtk()
-    worker.main()
+    worker = WorkerImLenta()
+    # worker.main()
+    worker.process_item_by_url('https://instamart.ru/lenta/chesnok-ekoprodukt-marinovannyy')
+
