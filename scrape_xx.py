@@ -437,7 +437,7 @@ class WorkerImBase(WorkerBase):
                 el.decode()  # HTML almost-source.
                 for el in desc_el.children)
 
-        item_data['nutrition_title'] = self.el_text(item_bs.select_one('.nutrition .nutrition_title'))
+        item_data['nutrition_title'] = self.el_text(item_bs.select_one('.nutrition .nutrition-title'))
         nutrition_props = item_bs.select('.nutrition .product-property')
         item_data['nutritipn_properties'] = {
             self.el_text(elem.select_one('.product-property__name')):
@@ -446,7 +446,7 @@ class WorkerImBase(WorkerBase):
 
         item_data['ingredients_text'] = self.el_text(item_bs.select_one('.ingredients__text'))
 
-        other_props = item_bs.select_one('.other-properties .product-property')
+        other_props = item_bs.select('.other-properties .product-property')
         item_data['properties'] = self.skip_none({
             self.el_text(elem.select_one('.product-property__name')):
             self.el_text(elem.select_one('.product-property__value'))
@@ -473,6 +473,5 @@ class WorkerImLenta(WorkerImBase):
 
 if __name__ == '__main__':
     worker = WorkerImLenta()
-    # worker.main()
-    worker.process_item_by_url('https://instamart.ru/lenta/chesnok-ekoprodukt-marinovannyy')
+    worker.main()
 
