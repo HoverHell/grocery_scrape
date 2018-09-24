@@ -12,6 +12,7 @@ import threading
 import datetime
 import logging
 import json
+import traceback
 
 import bs4
 import requests
@@ -33,7 +34,7 @@ class WorkerBase:
     _max_errors = 100
 
     retry_conf = Retry(
-        total=5, backoff_factor=0.5,
+        total=25, backoff_factor=0.5,
         status_forcelist=[500, 502, 503, 504, 521],
         method_whitelist=frozenset(['HEAD', 'TRACE', 'GET', 'PUT', 'OPTIONS', 'DELETE', 'POST']),
     )
@@ -112,7 +113,7 @@ class WorkerBase:
         # return bs4.BeautifulSoup(resp.content, 'html5lib')
         return bs4.BeautifulSoup(resp.text, 'html5lib')
 
-    def try_(self, func, excs=(AttributeError, TypeError, ValueError), default=None):
+    def try_(self, func, excs=(AttributeError, TypeError, ValueError), default=None, silent=False):
         try:
             return func()
         except excs as exc:
@@ -121,7 +122,15 @@ class WorkerBase:
                 self._all_errors.append(exc_info)
                 if len(self._all_errors) > self._max_errors:
                     self._all_errors.pop(0)
-            LOG.error('`try_`-wrapped error: %r', exc)
+
+            if not silent:
+                LOG.error('`try_`-wrapped error: %r', exc)
+                if os.environ.get('IPDBG'):
+                    traceback.print_exc()
+                    import ipdb
+                    _, _, sys.last_traceback = exc_info
+                    ipdb.pm()
+
             return default
 
     @staticmethod
@@ -358,6 +367,9 @@ class WorkerImBase(WorkerBase):
         self.map_(self.process_category, cats['urls'])
 
     def get_cat_data(self, url=None):
+        if not self.force and os.path.exists(self.cats_file):
+            return json.load(open(self.cats_file))
+
         cat_resp = self.get(url)
         base_url = cat_resp.url
         cat_bs = self.bs(cat_resp)
@@ -388,19 +400,19 @@ class WorkerImBase(WorkerBase):
             base_url = page_resp.url
             page_bs = self.bs(page_resp)
             items_container_bs = page_bs.select_one('.products_with_filters_wrapper')
-            emptiness_message = items_container_bs.select('.empty-filter-message')
+            emptiness_message = items_container_bs.select_one('.empty-filter-message')
             if emptiness_message is not None:  # supposedly, an empty page.
                 break
-            items_bses = items_container_bs.selct('li.product')
+            items_bses = items_container_bs.select('li.product')
             self.map_(lambda item_bs: self.process_item(item_bs, root_url=base_url), items_bses)
 
     def process_item(self, item_bs, root_url):
-        item_url = item_bs.select_one('a.product_link').get('href')
+        item_url = item_bs.select_one('a.product__link').get('href')
         item_url = urllib.parse.urljoin(root_url, item_url)
 
         if item_url in self.processed_items:
             LOG.debug("Already processed: %s", item_url)
-            return
+            return None
 
         return self.process_item_by_url(item_url)
 
@@ -454,9 +466,12 @@ class WorkerImBase(WorkerBase):
 
         item_data['properties_links'] = self.skip_none({
             self.el_text(elem.select_one('.product-property__name')):
-            self.try_(lambda: urllib.parse.urljoin(
-                base_url,
-                elem.select_one('.product-property__value a.product-link').get('href')))
+            self.try_(
+                lambda: urllib.parse.urljoin(
+                    base_url,
+                    elem.select_one('.product-property__value a.product-link').get('href')),
+                silent=True,
+            )
             for elem in other_props})
 
         self.write_item(item_data)
@@ -464,14 +479,27 @@ class WorkerImBase(WorkerBase):
             self.processed_items.add(item_url)
 
 
-class WorkerImLenta(WorkerImBase):
+class WorkerImCommon(WorkerImBase):
 
-    url_cats = 'https://instamart.ru/lenta'
-    cats_file = 'im_lenta_categories.json'
-    items_file = 'im_lenta_items.jsl'
+    known_names = ('metro', 'vkusvill', 'lenta', 'karusel')
+
+    def __init__(self, name, **kwargs):
+        '''
+        :param name: see `known_names`.
+        '''
+        super().__init__(**kwargs)
+        self.name = name
+
+    @classmethod
+    def run_all(cls):
+        for name in cls.known_names:
+            worker = cls(name)
+            worker.main()
+
+    url_cats = property(lambda self: 'https://instamart.ru/{}'.format(self.name))
+    cats_file = property(lambda self: 'im_{}_categories.json'.format(self.name))
+    items_file = property(lambda self: 'im_{}_items.jsl'.format(self.name))
 
 
 if __name__ == '__main__':
-    worker = WorkerImLenta()
-    worker.main()
-
+    WorkerImCommon.run_all()
