@@ -451,7 +451,7 @@ class WorkerImBase(WorkerBase):
 
         item_data['nutrition_title'] = self.el_text(item_bs.select_one('.nutrition .nutrition-title'))
         nutrition_props = item_bs.select('.nutrition .product-property')
-        item_data['nutritipn_properties'] = {
+        item_data['nutrition_properties'] = {
             self.el_text(elem.select_one('.product-property__name')):
             self.el_text(elem.select_one('.product-property__value'))
             for elem in nutrition_props}
