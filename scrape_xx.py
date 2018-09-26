@@ -176,7 +176,7 @@ class WorkerBase:
             self.try_(lambda: func(item))
 
     @staticmethod
-    def el_text(el, default=None):
+    def el_text(el, default=None, strip=True):
         if el is None:
             return default
         if isinstance(el, bs4.element.NavigableString):
@@ -185,6 +185,8 @@ class WorkerBase:
             result = el.text
         # Turn the non-breakable spaces into the normal ones.
         result = result.replace('\xa0', ' ')
+        if strip:
+            result = result.strip()
         return result
 
     def write_item(self, data):
@@ -577,7 +579,7 @@ class WorkerOkey(WorkerBase):
             return dict(
                 id=cat_el.get('id'),
                 url=urllib.parse.urljoin(base_url, cat_el.get('href')),
-                title=self.el_text(cat_el).strip(),
+                title=self.el_text(cat_el),
                 parent_id=self.try_(lambda: cat_parent(cat_el)),
             )
 
@@ -681,6 +683,7 @@ class WorkerOkey(WorkerBase):
             LOG.debug("Likely a non-terminal category (no products): %s", root_url)
             return
 
+        LOG.debug("Category page: %s", root_url)
         pages_params = None
 
         scripts = base_page_bs.select('script')
@@ -730,9 +733,59 @@ class WorkerOkey(WorkerBase):
     def process_item_url_i(self, base_url, item_bs, **kwargs):
         item_data = {}
 
-        crumbs_bs = item_bs.select_one('#widget_breadcrumb')
-        raise Exception("TODO")
+        item_base_bs = item_bs
+        item_bs = item_base_bs.select_one('.product_page_content')
 
+        crumbs_bs = item_bs.select_one('#widget_breadcrumb')
+        crumbs = list(
+            dict(
+                url=urllib.parse.urljoin(base_url, elem.get('href') or ''),
+                title=self.el_text(elem))
+            for elem in crumbs_bs.select('a'))
+        crumbs += list(
+            dict(title=self.el_text(elem))
+            for elem in crumbs_bs.select('li.current'))
+        item_data['crumbs'] = crumbs
+
+        info_bs = item_bs.select_one('.product-information')
+
+        item_data['title'] = self.el_text(info_bs.select_one('.main_header'))
+
+        price_bs = item_bs.select_one('.product_price')
+        item_data['price_crossed'] = self.el_text(price_bs.select_one('.crossed'))
+        item_data['price'] = self.el_text(price_bs.select_one('.price'))
+
+        chars_el = info_bs.select_one('.product-characteristics')
+        if self.el_text(chars_el):
+            item_data['characteristics_html'] = chars_el.decode()
+
+        def parse_prop_elem(prop_elem):
+            name = None
+            value = None
+            for subelem in prop_elem.children:
+                if isinstance(subelem, bs4.element.NavigableString):
+                    continue
+                elif (subelem.get('id') or '').startswith('descAttributeName_'):
+                    name = self.el_text(subelem)
+                elif (subelem.get('id') or '').startswith('descAttributeValue_'):
+                    value = self.el_text(subelem)
+            return name, value
+
+        props_els = item_bs.select('.widget-list > li')
+        props = {}
+        for elem in props_els:
+            name, value = self.try_(lambda: parse_prop_elem(elem)) or (None, None)
+            if not name or value is None:
+                continue
+            name_base = name
+            for idx in range(10):
+                if name not in props:
+                    break
+                name = '{}_{}'.format(name_base, idx)
+
+            props[name] = value
+
+        item_data['props'] = props
         return item_data
 
 
