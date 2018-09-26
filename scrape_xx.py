@@ -22,11 +22,6 @@ from requests.packages.urllib3.util import Retry  # pylint: disable=import-error
 LOG = logging.getLogger(__name__)
 
 
-# with open('.proxy_auth.txt') as fobj:
-#     PROXY_AUTH = fobj.read().strip()
-# PROXY_AUTH = 'Basic U29...'
-
-
 def parse_url(url, base=None):
     url_full = None
     if base is not None:
@@ -114,17 +109,24 @@ class WorkerBase:
             self.processed_items.add(item.get(key))
         LOG.debug("Previously processed addresses: %d", len(self.processed_items))
 
-    def req(self, *args, allow_redirects=True, method='get', **kwargs):
+    def req(self, *args, allow_redirects=True, method='get', default_headers=True, **kwargs):
 
         rfs = kwargs.pop('rfs', True)
 
         headers = dict(kwargs.pop('headers', None) or {})
-        # headers['Proxy-Authorization'] = PROXY_AUTH
+
+        if default_headers:
+            headers.update({
+                'User-Agent': 'Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:62.0) Gecko/20100101 Firefox/62.0',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.5',
+            })
 
         resp = self.reqr.request(
             method,
             *args,
             allow_redirects=allow_redirects,
+            headers=headers,
             **kwargs)
 
         if rfs == '200':
@@ -562,7 +564,7 @@ class WorkerOkey(WorkerBase):
         base_url = cat_resp.url
         cat_bs = self.bs(cat_resp)
 
-        base_el = cat_bs.select_one('ul#departmentsMenu')
+        base_el = cat_bs.select_one('#departmentsMenu')
         cats = base_el.select('a.menuLink')
 
         def cat_parent(cat_el):
@@ -621,7 +623,6 @@ class WorkerOkey(WorkerBase):
                 # filterFacet='',
             ),
             headers={
-                'User-Agent': 'Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:62.0) Gecko/20100101 Firefox/62.0',
                 'Accept': '*/*',
                 'X-Requested-With': 'XMLHttpRequest',
             },
