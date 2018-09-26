@@ -27,6 +27,33 @@ LOG = logging.getLogger(__name__)
 # PROXY_AUTH = 'Basic U29...'
 
 
+def parse_url(url, base=None):
+    url_full = None
+    if base is not None:
+        url_full = urllib.parse.urljoin(base, url)
+    parts = urllib.parse.urlparse(url)
+    paramses = urllib.parse.parse_qs(parts.query)
+    params = dict(urllib.parse.parse_qsl(parts.query))
+    return dict(
+        url_full=url_full,
+        url=url,
+
+        scheme=parts.scheme,
+        netloc=parts.netloc,
+        path=parts.path,
+        path_params=parts.params,
+        fragment=parts.fragment,
+
+        username=parts.username,
+        password=parts.password,
+        hostname=parts.hostname,
+        port=parts.port,
+
+        params=params,
+        paramses=paramses,
+    )
+
+
 class WorkerBase:
 
     items_file = None  # required for `self.write_item`.
@@ -87,14 +114,15 @@ class WorkerBase:
             self.processed_items.add(item.get(key))
         LOG.debug("Previously processed addresses: %d", len(self.processed_items))
 
-    def get(self, *args, allow_redirects=True, **kwargs):
+    def req(self, *args, allow_redirects=True, method='get', **kwargs):
 
         rfs = kwargs.pop('rfs', True)
 
         headers = dict(kwargs.pop('headers', None) or {})
         # headers['Proxy-Authorization'] = PROXY_AUTH
 
-        resp = self.reqr.get(
+        resp = self.reqr.request(
+            method,
             *args,
             allow_redirects=allow_redirects,
             **kwargs)
@@ -108,6 +136,9 @@ class WorkerBase:
             resp.raise_for_status()
 
         return resp
+
+    def get(self, *args, **kwargs):
+        return self.req(*args, method='get', **kwargs)
 
     def bs(self, resp):
         # return bs4.BeautifulSoup(resp.content, 'html5lib')
@@ -179,6 +210,26 @@ class WorkerBase:
     def main_i(self):
         raise NotImplementedError
 
+    def process_item_url(self, item_url, **kwargs):
+        if item_url in self.processed_items and not self.force:
+            LOG.debug("Already processed: %s", item_url)
+            return
+
+        item_resp = self.get(item_url)
+        base_url = item_resp.url
+        item_data = dict(url=base_url, ts=self.now())
+        item_bs = self.bs(item_resp)
+
+        res_data = self.process_item_url_i(base_url, item_bs, item_resp=item_resp, **kwargs)
+        item_data.update(res_data)
+
+        self.write_item(item_data)
+        with self.mgmt_lock:
+            self.processed_items.add(item_url)
+
+    def process_item_url_i(self, base_url, item_bs, **kwargs):
+        raise NotImplementedError
+
 
 class WorkerUtk(WorkerBase):
 
@@ -247,30 +298,25 @@ class WorkerUtk(WorkerBase):
         page_resp = self.get(url, allow_redirects=False)
         if page_resp.status_code in (301, 302):  # pages over limit redirect to non-paged `url2`
             return dict(status='redirected')
+        base_url = page_resp.url
         page_bs = self.bs(page_resp)
 
         items_special = page_bs.select('.goods_view_timetobuy > .goods_view_timetobuy-view')
         items_main = page_bs.select('.goods_view_box > .goods_view-item')
         items = list(items_special) + list(items_main)
 
-        self.map_(lambda item_bs: self.process_item(item_bs, page_resp=page_resp), items)
+        items_urls = list(
+            (item_bs.select_one('a.goods_caption') or {}).get('href')
+            for item_bs in items)
+        items_urls = list(
+            urllib.parse.urljoin(base_url, item_url)
+            for item_url in items_urls if item_url)
+
+        self.map_(self.process_item_url, items_urls)
         return {}
 
-    def process_item(self, item_bs, page_resp):
-        item_uri = item_bs.select_one('a.goods_caption').get('href')
-        item_url = urllib.parse.urljoin(page_resp.url, item_uri)
-
-        # A bit of simple caching.
-        # Particularly necessary because upper categories contain most/all of the subitems.
-        if item_url in self.processed_items:
-            LOG.debug("Already processed: %s", item_url)
-            return
-
-        item_resp = self.get(item_url)
-        base_url = item_resp.url
-        item_data = dict(url=base_url, ts=self.now())
-        item_bs = self.bs(item_resp)
-
+    def process_item_url_i(self, base_url, item_bs, **kwargs):
+        item_data = {}
         pic_bs = item_bs.select_one('.goods_view_item-pic')
         pic_variants = pic_bs.select(
             '.goods_view_item-variant_area'
@@ -344,9 +390,7 @@ class WorkerUtk(WorkerBase):
             self.try_(lambda: el.select_one('.goods_view_item-property_value > a').get('href'))
             for el in props}
 
-        self.write_item(item_data)
-        with self.mgmt_lock:
-            self.processed_items.add(item_url)
+        return item_data
 
 
 class WorkerImBase(WorkerBase):
@@ -404,24 +448,18 @@ class WorkerImBase(WorkerBase):
             if emptiness_message is not None:  # supposedly, an empty page.
                 break
             items_bses = items_container_bs.select('li.product')
-            self.map_(lambda item_bs: self.process_item(item_bs, root_url=base_url), items_bses)
+            items_urls = list(
+                (item_bs.select_one('a.product__link') or {}).get('href')
+                for item_bs in items_bses)
+            items_urls = list(
+                urllib.parse.urljoin(base_url, item_url)
+                for item_url in items_urls if item_url)
+            self.map_(self.process_item_url, items_urls)
 
-    def process_item(self, item_bs, root_url):
-        item_url = item_bs.select_one('a.product__link').get('href')
-        item_url = urllib.parse.urljoin(root_url, item_url)
+    def process_item_url_i(self, base_url, item_bs, **kwargs):
+        item_data = {}
 
-        if item_url in self.processed_items:
-            LOG.debug("Already processed: %s", item_url)
-            return None
-
-        return self.process_item_by_url(item_url)
-
-    def process_item_by_url(self, item_url):
-        item_resp = self.get(item_url)
-        base_url = item_resp.url
-        item_data = dict(url=base_url, ts=self.now())
-        item_bs_root = self.bs(item_resp)
-
+        item_bs_root = item_bs
         item_bs = item_bs_root.select_one('.product-popup')
 
         crumbs_bs = item_bs.select_one('.product-popup__breadcrumbs')
@@ -474,9 +512,7 @@ class WorkerImBase(WorkerBase):
             )
             for elem in other_props})
 
-        self.write_item(item_data)
-        with self.mgmt_lock:
-            self.processed_items.add(item_url)
+        return item_data
 
 
 class WorkerImCommon(WorkerImBase):
@@ -501,5 +537,206 @@ class WorkerImCommon(WorkerImBase):
     items_file = property(lambda self: 'im_{}_items.jsl'.format(self.name))
 
 
+class WorkerOkey(WorkerBase):
+
+    url_cats = 'https://www.okeydostavka.ru/msk/catalog'
+    cats_file = 'okd_categories.json'
+    items_file = 'okd_items.jsl'
+
+    def main_i(self):
+        if not self.force:
+            self.collect_processed_items()
+
+        cats = self.get_cat_data()
+        self.categories = cats
+        self.write_data(self.cats_file, cats)
+        self.map_(self.process_category, cats)
+
+    def get_cat_data(self):
+        if not self.force and os.path.exists(self.cats_file):
+            return json.load(open(self.cats_file))
+
+        cat_resp = self.get(self.url_cats)
+        base_url = cat_resp.url
+        cat_bs = self.bs(cat_resp)
+
+        base_el = cat_bs.select_one('ul#departmentsMenu')
+        cats = base_el.select('a.menuLink')
+
+        def cat_parent(cat_el):
+            cat_li_el = cat_el.parent
+            # assert cat_li_el.name == 'li'
+            upcat_ul_el = cat_li_el.parent
+            # assert upcat_ul_el.name == 'ul'
+            upcat_a_el = upcat_ul_el.find_previous_sibling('a')
+            if not upcat_a_el:
+                return None
+            return upcat_a_el.get('id')
+
+        def cat_data(cat_el):
+            return dict(
+                id=cat_el.get('id'),
+                url=urllib.parse.urljoin(base_url, cat_el.get('href')),
+                title=self.el_text(cat_el).strip(),
+                parent_id=self.try_(lambda: cat_parent(cat_el)),
+            )
+
+        return list(cat_data(cat_el) for cat_el in cats)
+
+    def process_category(self, cat):
+        return self.process_category_url(cat['url'])
+
+    def get_cat_page(self, store_id, catalog_id, cat_id, position=0, page_size=72, params=None):
+        resp = self.req(
+            'https://www.okeydostavka.ru/webapp/wcs/stores/servlet/ProductListingView',
+            method='post',
+            params=dict(
+                params or {},
+                # the category
+                storeId=store_id,  # '10151',
+                catalogId='12051',
+                categoryId=cat_id,  # '30552',
+                # notable
+                resultsPerPage=page_size,
+                # searchType='1000',
+                # langId='-20',
+                # sType='SimpleSearch',
+                # custom_view='true',
+                # ajaxStoreImageDir='/wcsstore/OKMarketSAS/',
+                # disableProductCompare='true',
+                # ddkey='ProductListingView_6_-1011_3074457345618259713',
+                # # empties
+                # resultCatEntryType='',
+                # lm='',
+                # filterTerm='',
+                # advancedSearch='',
+                # gridPosition='',
+                # metaData='',
+                # manufacturer='',
+                # searchTerm='',
+                # emsName='',
+                # facet='',
+                # filterFacet='',
+            ),
+            headers={
+                'User-Agent': 'Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:62.0) Gecko/20100101 Firefox/62.0',
+                'Accept': '*/*',
+                'X-Requested-With': 'XMLHttpRequest',
+            },
+            data=dict(
+                # page location; '0', '72', '144', '216', ...
+                beginIndex=position,
+                # same as beginIndex
+                productBeginIndex=position,
+                # notable
+                pageSize=page_size,
+                # hopefully unneeded
+                # currentPage='Чай',
+                # # unknowns
+                # contentBeginIndex='0',
+                # pageView='grid',
+                # resultType='products',
+                # storeId='10151',
+                # ffcId='13151',
+                # storeGroup='msk1',
+                # catalogId='12051',
+                # langId='-20',
+                # userType='G',
+                # userId='-1002',
+                # currencySymbol='руб.',
+                # businessChannel='-1',
+                # mobihubVersion='011',
+                # logonUrl='/webapp/wcs/stores/servlet/ReLogonFormView?catalogId=12051&myAcctMain=1&langId=-20&storeId=10151',
+                # isB2B='false',
+                # b2bMinCartTotal='',
+                # maxOrderWeight='80',
+                # iosAppId='1087812169',
+                # imageDirectoryPath='/wcsstore/OKMarketSAS/',
+                # isFfcMode='true',
+                # objectId='_6_-1011_3074457345618259713',
+                requesttype='ajax',
+                # # empties
+                # orderBy='',
+                # facetId='',
+                # orderByContent='',
+                # searchTerm='',
+                # facet='',
+                # facetLimit='',
+                # minPrice='',
+                # maxPrice='',
+                # logonId='',
+                # userFirstName='',
+                # userLastName='',
+            ),
+        )
+        return resp
+
+    def process_category_url(self, root_url):
+        base_page_resp = self.get(root_url)
+        base_url = base_page_resp.url
+        base_page_bs = self.bs(base_page_resp)
+
+        products = base_page_bs.select_one('.product_listing_container .product_name')
+        if not products:
+            LOG.debug("Likely a non-terminal category (no products): %s", root_url)
+            return
+
+        pages_params = None
+
+        scripts = base_page_bs.select('script')
+        sbn_scripts = list(
+            script_el for script_el in scripts
+            if '/webapp/wcs/stores/servlet/ProductListingView' in script_el.text)
+        if sbn_scripts:
+            uri_match = re.search("""['"]([^"']*/webapp/wcs/stores/servlet/ProductListingView[^"']+)['"]""", sbn_scripts[0].text)
+            if uri_match:
+                pages_uri = uri_match.group(1)
+                pages_params = parse_url(pages_uri)['params']
+        if not pages_params:
+            # hlink = base_page_bs.select_one('a#contentLink_1_HeaderStoreLogo_Content')['href']
+            # params = parse_url(hlink)['params']
+            # store_id = params['storeId']
+            # catalog_id = params['catalogId']
+            # # See also:
+            # # base_page_bs.select_one('a#advancedSearch')['href']
+            # # ...
+            search_inputs = base_page_bs.select('#searchBox > input')
+            pages_params = {
+                input_el['name']: input_el['value'] for input_el in search_inputs
+                if input_el.get('value')}
+            pages_params['categoryId'] = base_url.rsplit('-', 2)[-2]
+
+        store_id = pages_params['storeId']
+        catalog_id = pages_params['catalogId']
+        cat_id = pages_params['categoryId']
+
+        position = 0
+        all_items = []
+        for _ in range(1, 9000):
+            page_resp = self.get_cat_page(
+                store_id=store_id, catalog_id=catalog_id, cat_id=cat_id,
+                position=position)
+            page_bs = self.bs(page_resp)
+            page_items = page_bs.select('.product_name > a')
+            LOG.info("Page items: %r", len(page_items))
+            if not page_items:
+                break
+            position += len(page_items)
+            all_items.extend(page_items)
+
+        all_items_urls = [urllib.parse.urljoin(base_url, item_el['href']) for item_el in all_items]
+        self.map_(self.process_item_url, all_items_urls)
+
+    def process_item_url_i(self, base_url, item_bs, **kwargs):
+        item_data = {}
+
+        crumbs_bs = item_bs.select_one('#widget_breadcrumb')
+        raise Exception("TODO")
+
+        return item_data
+
+
 if __name__ == '__main__':
-    WorkerImCommon.run_all()
+    # WorkerUtk().main()
+    # WorkerImCommon.run_all()
+    WorkerOkey().main()
