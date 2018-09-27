@@ -157,7 +157,11 @@ class WorkerBase:
                     self._all_errors.pop(0)
 
             if not silent:
-                LOG.error('`try_`-wrapped error: %r', exc)
+                _, _, etb = exc_info
+                LOG.error(
+                    '`try_`-wrapped error: %r; %s',
+                    exc,
+                    ''.join(traceback.format_tb(etb, 2)).replace('\n', ';'))
                 if os.environ.get('IPDBG'):
                     traceback.print_exc()
                     import ipdb
