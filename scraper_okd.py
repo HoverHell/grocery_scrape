@@ -37,6 +37,19 @@ class WorkerOkey(WorkerBase):
             for item_url in cat_info['item_urls'])
         self.map_(self.process_item_url, items_urls)
 
+    def _check_for_error_page(self, resp, bs):
+        title = self.el_text(bs.select_one('.title')) or ''
+        if 'Bad IP' in title:
+            message = self.el_text(bs.select_one('.message')) or ''
+            raise Exception('Got ‘Bad IP’: {title!r} {message!r}.'.format(
+                title=title, message=message))
+
+    def bs(self, resp, check_for_error_page=True, **kwargs):
+        bs = super().bs(resp, **kwargs)
+        if check_for_error_page:
+            self._check_for_error_page(resp, bs)
+        return bs
+
     def get_cat_data(self):
         if not self.force and os.path.exists(self.cats_file):
             return json.load(open(self.cats_file))
@@ -79,7 +92,7 @@ class WorkerOkey(WorkerBase):
                 params or {},
                 # the category
                 storeId=store_id,  # '10151',
-                catalogId='12051',
+                catalogId=catalog_id,
                 categoryId=cat_id,  # '30552',
                 # notable
                 resultsPerPage=page_size,
