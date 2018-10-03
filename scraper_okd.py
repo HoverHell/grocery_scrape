@@ -7,7 +7,7 @@
 import re
 from scraper_base import (
     os, json, urllib,
-    bs4,
+    requests, bs4,
     LOG,
     parse_url,
     WorkerBase,
@@ -16,10 +16,77 @@ from scraper_base import (
 
 class WorkerOkey(WorkerBase):
 
+    url_host = 'https://www.okeydostavka.ru'
     url_cats = 'https://www.okeydostavka.ru/msk/catalog'
     cats_file = 'okd_categories.json'
     cat_items_file = 'okd_cat_items.jsl'
     items_file = 'okd_items.jsl'
+
+    proxies_iter = None
+    proxy_arg = None
+
+    # ...
+
+    def get_proxies(self):
+        resp = self.req('https://www.free-proxy-list.net/')
+        resp.raise_for_status()
+        bs = self.bs(resp)
+        rows = bs.select('table#proxylisttable > tbody > tr')
+        if not rows:
+            raise Exception("No proxy elements")
+        LOG.info("Proxy elements count: %d", len(rows))
+        for row in rows:
+            try:
+                cells = row.select('td')
+                host, port, _, _, _, _, is_https, _ = cells[:8]
+                addr = '{proto}{host}:{port}'.format(
+                    proto='https://' if self.el_text(is_https) == 'yes' else 'http://',
+                    host=self.el_text(host),
+                    port=self.el_text(port),
+                )
+                arg = dict(http=addr, https=addr)
+                resp = requests.get('https://example.com', proxies=arg, timeout=1)
+                resp.raise_for_status()
+            except Exception as exc:
+                LOG.warning("Proxylist error=%r, item=%r", exc, cells)
+            else:
+                yield arg
+
+    def _is_proxied_url(self, url):
+        return url.startswith(self.url_host)
+
+    def req(self, url, *args, tries=3, **kwargs):
+        if not self._is_proxied_url(url):
+            return super().req(url, *args, **kwargs)
+
+        if self.proxy_arg is None:
+            self.proxies_iter = self.get_proxies()
+            self.proxy_arg = next(self.proxies_iter)
+
+        for retries_remain in reversed(range(tries)):
+            kwargs['proxies'] = self.proxy_arg
+            try:
+                return super().req(url, *args, **kwargs)
+            except Exception:
+                if not retries_remain:
+                    raise
+                self.proxy_arg = next(self.proxies_iter)
+        raise Exception("Not even trying")
+
+    def _check_for_error_page(self, resp, bs):
+        title = self.el_text(bs.select_one('.title')) or ''
+        if 'Bad IP' in title:
+            message = self.el_text(bs.select_one('.message')) or ''
+            raise Exception('Got ‘Bad IP’: {title!r} {message!r}.'.format(
+                title=title, message=message))
+
+    def bs(self, resp, check_for_error_page=True, **kwargs):
+        bs = super().bs(resp, **kwargs)
+        if check_for_error_page and self._is_proxied_url(resp.url):
+            self._check_for_error_page(resp, bs)
+        return bs
+
+    # ...
 
     def main_i(self):
         if not self.force:
@@ -36,19 +103,6 @@ class WorkerOkey(WorkerBase):
             for cat_info in cat_infos
             for item_url in cat_info['item_urls'])
         self.map_(self.process_item_url, items_urls)
-
-    def _check_for_error_page(self, resp, bs):
-        title = self.el_text(bs.select_one('.title')) or ''
-        if 'Bad IP' in title:
-            message = self.el_text(bs.select_one('.message')) or ''
-            raise Exception('Got ‘Bad IP’: {title!r} {message!r}.'.format(
-                title=title, message=message))
-
-    def bs(self, resp, check_for_error_page=True, **kwargs):
-        bs = super().bs(resp, **kwargs)
-        if check_for_error_page:
-            self._check_for_error_page(resp, bs)
-        return bs
 
     def get_cat_data(self):
         if not self.force and os.path.exists(self.cats_file):
