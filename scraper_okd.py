@@ -157,7 +157,7 @@ class WorkerOkey(WorkerBase):
 
     def process_category_url(self, root_url):
         """ category base page url -> None; dumps the category items urls into a file """
-        all_items_urls = self.process_category_url_i()
+        all_items_urls = self.process_category_url_i(root_url)
         cat_data = dict(url=root_url, item_urls=all_items_urls or [])
         self.write_item(cat_data, filename=self.cat_items_file)
 
@@ -169,9 +169,14 @@ class WorkerOkey(WorkerBase):
 
         products = base_page_bs.select_one('.product_listing_container .product_name')
         if not products:
-            LOG.debug("Likely a non-terminal category (no products): %s", root_url)
-            import ipdb; ipdb.set_trace()   # XXXXXXXXXXXXXXXXXXXXXXXXXX: re-check the page anyway
-            return None
+            subcats = base_page_bs.select('div.row.categories > div')
+            if subcats:
+                LOG.debug("A non-terminal category (no products, %d subcategories): %s", len(subcats), root_url)
+                return None
+            # else:
+            with open('.okd_last_error_page.html', 'wb') as fo:
+                fo.write(base_page_resp.content)
+            raise Exception("Probably an error page at {}".format(root_url))
 
         LOG.debug("Category page: %s", root_url)
         pages_params = None
