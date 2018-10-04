@@ -2,126 +2,19 @@
 """
 ...
 """
-# pylint: disable=cell-var-from-loop,fixme
+# pylint: disable=cell-var-from-loop,fixme,arguments-differ
 
 import re
 from scraper_base import (
     os, json, urllib,
-    requests, bs4,
+    bs4,
     LOG,
     parse_url,
-    WorkerBase,
 )
+from scraper_base_proxied import WorkerBaseProxied
 
 
-def group(lst):
-    res = {}
-    for key, val in lst:
-        try:
-            group_list = res[key]
-        except KeyError:
-            res[key] = [val]
-        else:
-            group_list.append(val)
-    return res
-
-
-class WorkerProxiedMixin(WorkerBase):
-
-    proxies_iter = None
-    proxy_arg = None
-    proxy_retries = 3
-
-    def _is_proxied_url(self, url, **kwargs):  # pylint: disable=unused-argument
-        return False
-
-    def req(self, url, *args, tries=None, **kwargs):
-        if not self._is_proxied_url(url):
-            return super().req(url, *args, **kwargs)
-
-        if tries is None:
-            tries = self.proxy_retries
-
-        if self.proxy_arg is None:
-            self.proxies_iter = self.get_proxies()
-            self.proxy_arg = next(self.proxies_iter)
-
-        for retries_remain in reversed(range(tries)):
-            kwargs['proxies'] = self.proxy_arg
-            try:
-                return super().req(url, *args, **kwargs)
-            except Exception:
-                if not retries_remain:
-                    raise
-                self.proxy_arg = next(self.proxies_iter)
-        raise Exception("Not even trying")
-
-    def get_proxies(self, **kwargs):
-        for item in self.get_proxies_fpl(**kwargs):
-            yield item
-
-    def _check_proxy(self, arg):
-        try:
-            resp = requests.get('https://example.com', proxies=arg, timeout=1)
-            resp.raise_for_status()
-        except Exception as exc:
-            LOG.debug("Proxy %r error %r", arg, exc)
-            return False
-        return True
-
-    def get_proxies_fpl(self):
-        resp = self.req('https://www.free-proxy-list.net/')
-        resp.raise_for_status()
-        bs = self.bs(resp)
-        rows = bs.select('table#proxylisttable > tbody > tr')
-        if not rows:
-            raise Exception("No proxy elements")
-        LOG.info("Proxy elements count: %d", len(rows))
-        for row in rows:
-            try:
-                cells = row.select('td')
-                host, port, _, _, _, _, is_https, _ = cells[:8]
-                addr = '{proto}{host}:{port}'.format(
-                    proto='https://' if self.el_text(is_https) == 'yes' else 'http://',
-                    host=self.el_text(host),
-                    port=self.el_text(port),
-                )
-                arg = dict(http=addr, https=addr)
-                if self._check_proxy(arg):
-                    yield arg
-            except Exception as exc:
-                LOG.warning("Proxylist error=%r, item=%r", exc, cells)
-
-    def get_proxies_pp(self):
-        for page in range(1, 9):
-            url = 'https://premproxy.com/list/'
-            if page != 1:
-                url = '%s%02d.html' % (url, page)
-            resp = self.req(url)
-            bs = self.bs(resp)
-            bs_form = bs.select_one('form[name=slctips]')
-            req2_url = urllib.parse.urljoin(resp.url, bs_form.get('action') or {})
-            req2_method = bs_form.get('method')
-            req2_data = group(
-                (elem.get('name') or '', elem.get('value') or '')
-                for elem in bs_form.select('input'))
-
-            resp2 = self.req(req2_url, method=req2_method, data=req2_data)
-            bs2 = self.bs(resp2)
-            addrs = list(
-                self.el_text(elem)
-                for elem in bs2.select('ul#ipportlist > li'))
-            for addr in addrs:
-                for proto in ('http://', 'https://'):
-                    addr_full = '{}{}'.format(proto, addr)
-                    arg = dict(http=addr_full, https=addr_full)
-                    if self._check_proxy(arg):
-                        yield arg
-
-        resp.raise_for_status()
-        bs = self.bs(resp)
-
-class WorkerOkey(WorkerProxiedMixin, WorkerBase):
+class WorkerOkey(WorkerBaseProxied):
 
     url_host = 'https://www.okeydostavka.ru'
     url_cats = 'https://www.okeydostavka.ru/msk/catalog'
@@ -134,7 +27,9 @@ class WorkerOkey(WorkerProxiedMixin, WorkerBase):
     def _is_proxied_url(self, url):
         return url.startswith(self.url_host)
 
-    def _check_for_error_page(self, resp, bs):
+    def _check_for_error_page(self, resp, bs=None):
+        if bs is None:
+            bs = self.bs(resp, check_for_error_page=False)
         title = self.el_text(bs.select_one('.title')) or ''
         if 'Bad IP' in title:
             message = self.el_text(bs.select_one('.message')) or ''
@@ -142,9 +37,12 @@ class WorkerOkey(WorkerProxiedMixin, WorkerBase):
                 title=title, message=message))
 
     def bs(self, resp, check_for_error_page=True, **kwargs):
-        bs = super().bs(resp, **kwargs)
-        if check_for_error_page and self._is_proxied_url(resp.url):
-            self._check_for_error_page(resp, bs)
+        bs = getattr(resp, '_bs_cached', None)
+        if bs is None:
+            bs = super().bs(resp, **kwargs)
+            if check_for_error_page and self._is_proxied_url(resp.url):
+                self._check_for_error_page(resp, bs)
+        setattr(resp, '_bs_cached', bs)
         return bs
 
     # ...
@@ -164,6 +62,14 @@ class WorkerOkey(WorkerProxiedMixin, WorkerBase):
             for cat_info in cat_infos
             for item_url in cat_info['item_urls'])
         self.map_(self.process_item_url, items_urls)
+
+    def collect_processed_items(self, *args, **kwargs):
+        super().collect_processed_items(*args, **kwargs)
+        for item in self.read_jsl(self.cat_items_file, require=False):
+            self.processed_items.add(item.get('url'))
+        LOG.debug(
+            "Previously processed addresses (with category listings): %d",
+            len(self.processed_items))
 
     def get_cat_data(self):
         if not self.force and os.path.exists(self.cats_file):
@@ -285,6 +191,11 @@ class WorkerOkey(WorkerProxiedMixin, WorkerBase):
 
     def process_category_url(self, root_url):
         """ category base page url -> None; dumps the category items urls into a file """
+
+        if root_url in self.processed_items and not self.force:
+            LOG.debug("Already processed category listing: %s", root_url)
+            return
+
         all_items_urls = self.process_category_url_i(root_url)
         cat_data = dict(url=root_url, item_urls=all_items_urls or [])
         self.write_item(cat_data, filename=self.cat_items_file)
