@@ -120,3 +120,13 @@ class WorkerBaseProxied(WorkerBase):
                     arg = dict(http=addr_full, https=addr_full)
                     if self._check_proxy(arg):
                         yield arg
+
+    def get_proxies_fpl2(self):
+        try:
+            import selenium
+        except Exception:
+            LOG.warning("get_proxies_fpl2: no `selenium`")
+            return
+        url = 'http://www.freeproxylists.net/'
+        for page in range(1, 200):
+            pass  # TODO

@@ -197,7 +197,11 @@ class WorkerOkey(WorkerBaseProxied):
             return
 
         all_items_urls = self.process_category_url_i(root_url)
-        cat_data = dict(url=root_url, item_urls=all_items_urls or [])
+        cat_data = dict(
+            url=root_url,
+            ts=self.now(),
+            item_urls=all_items_urls or [],
+        )
         self.write_item(cat_data, filename=self.cat_items_file)
 
     def process_category_url_i(self, root_url):
