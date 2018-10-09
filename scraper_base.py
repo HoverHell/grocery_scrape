@@ -108,7 +108,7 @@ class WorkerBase:
             self.processed_items.add(item.get(key))
         LOG.debug("Previously processed addresses: %d", len(self.processed_items))
 
-    def req(self, *args, allow_redirects=True, method='get', default_headers=True, **kwargs):
+    def req(self, *args, allow_redirects=True, method='get', timeout=30, default_headers=True, **kwargs):
 
         rfs = kwargs.pop('rfs', True)
 
@@ -126,6 +126,7 @@ class WorkerBase:
             *args,
             allow_redirects=allow_redirects,
             headers=headers,
+            timeout=timeout,
             **kwargs)
 
         if rfs == '200':
