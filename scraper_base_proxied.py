@@ -4,6 +4,7 @@
 """
 # pylint: disable=cell-var-from-loop,fixme,abstract-method,arguments-differ
 
+import random
 from scraper_base import (
     urllib,
     requests,
@@ -80,6 +81,7 @@ class WorkerBaseProxied(WorkerBase):
         if not rows:
             raise Exception("No proxy elements")
         LOG.info("Proxy elements count: %d", len(rows))
+        random.shuffle(rows)
         for row in rows:
             try:
                 cells = row.select('td')
@@ -114,6 +116,7 @@ class WorkerBaseProxied(WorkerBase):
             addrs = list(
                 self.el_text(elem)
                 for elem in bs2.select('ul#ipportlist > li'))
+            random.shuffle(addrs)
             for addr in addrs:
                 for proto in ('http://', 'https://'):
                     addr_full = '{}{}'.format(proto, addr)

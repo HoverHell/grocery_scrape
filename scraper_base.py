@@ -108,7 +108,7 @@ class WorkerBase:
             self.processed_items.add(item.get(key))
         LOG.debug("Previously processed addresses: %d", len(self.processed_items))
 
-    def req(self, *args, allow_redirects=True, method='get', timeout=30, default_headers=True, **kwargs):
+    def req(self, *args, allow_redirects=True, method='get', timeout=120, default_headers=True, **kwargs):
 
         rfs = kwargs.pop('rfs', True)
 
@@ -176,10 +176,12 @@ class WorkerBase:
         for item in iterable:
             func(item)
 
-    def map_(self, func, iterable):
-        # TODO?: ThreadPool / multiprocessing
+    def map_(self, func, iterable, name='', excs=(Exception,)):
+        name = name or repr(func)
+        # TODO: ThreadPool / multiprocessing
         for item in iterable:
-            self.try_(lambda: func(item))
+            self.try_(lambda: func(item), excs=excs)
+        LOG.debug("Map %s done", name)
 
     @staticmethod
     def el_text(el, default=None, strip=True):
