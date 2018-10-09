@@ -253,19 +253,31 @@ class WorkerOkey(WorkerBaseProxied):
 
         position = 0
         all_items = []
+        all_items_urls = []
+        all_items_urls_set = set()
         for _ in range(1, 9000):
             page_resp = self.get_cat_page(
                 store_id=store_id, catalog_id=catalog_id, cat_id=cat_id,
                 position=position)
             page_bs = self.bs(page_resp)
             page_items = page_bs.select('.product_name > a')
+            page_items_urls = list(
+                urllib.parse.urljoin(base_url, item_el['href'])
+                for item_el in page_items)
             LOG.info("Page items: %r", len(page_items))
             if not page_items:
                 break
             position += len(page_items)
-            all_items.extend(page_items)
 
-        all_items_urls = [urllib.parse.urljoin(base_url, item_el['href']) for item_el in all_items]
+            new_page_items_urls = list(
+                url for url in page_items_urls
+                if url not in all_items_urls_set)
+            LOG.info("Page items (new): %r", len(new_page_items_urls))
+
+            all_items.extend(page_items)
+            all_items_urls.extend(new_page_items_urls)
+            all_items_urls_set.update(new_page_items_urls)
+
         return all_items_urls
 
     def process_item_url_i(self, base_url, item_bs, **kwargs):
