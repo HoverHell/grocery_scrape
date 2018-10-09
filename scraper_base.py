@@ -97,7 +97,11 @@ class WorkerBase:
         for line in fobj:
             if not line:
                 continue
-            yield json.loads(line.strip())
+            try:
+                item = json.loads(line.strip())
+            except (TypeError, ValueError):
+                pass
+            yield item
 
     def collect_processed_items(self, key='url', filename=None):
         LOG.debug("Collecting previously processed addresses...")
